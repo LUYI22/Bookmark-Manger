@@ -1,0 +1,4 @@
+.DS_Store
+project/backend/node_modules/
+project/backend/data/
+project/frontend/node_modules/

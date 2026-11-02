@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bookmark Manager</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>Bookmark Manager</h1>
+      <button id="new-bookmark-btn" class="btn btn-primary">+ New Bookmark</button>
+    </header>
+
+    <nav id="folder-bar" class="folder-bar"></nav>
+
+    <div class="toolbar">
+      <input id="search-input" type="search" placeholder="Search title, URL, description, tags..." />
+      <select id="tag-filter">
+        <option value="">All tags</option>
+      </select>
+    </div>
+
+    <main id="bookmark-list" class="bookmark-list">
+      <p class="empty-state" id="empty-state">No bookmarks yet. Click "New Bookmark" to add one.</p>
+    </main>
+  </div>
+
+  <!-- Bookmark create/edit modal -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="modal-title">New Bookmark</h2>
+      <form id="bookmark-form">
+        <label>
+          URL <span class="required">*</span>
+          <input id="field-url" type="text" placeholder="https://example.com" required />
+        </label>
+        <label>
+          Title
+          <input id="field-title" type="text" placeholder="(optional)" />
+        </label>
+        <label>
+          Description
+          <textarea id="field-description" placeholder="(optional)" rows="3"></textarea>
+        </label>
+        <label>
+          Folder
+          <select id="field-folder-select">
+            <option value="">No folder</option>
+            <option value="__new__">+ Create new folder...</option>
+          </select>
+        </label>
+        <label id="new-folder-wrap" class="hidden">
+          New folder name
+          <input id="field-new-folder-name" type="text" placeholder="e.g. Recipes" />
+        </label>
+        <label>
+          Tags <span class="hint">(comma-separated)</span>
+          <input id="field-tags" type="text" placeholder="e.g. dev, reference" />
+        </label>
+        <label class="checkbox-row">
+          <input id="field-favorite" type="checkbox" />
+          <span>☆ Add to Favorites</span>
+        </label>
+        <div class="color-field-group">
+          <label class="checkbox-row">
+            <input id="field-color-enabled" type="checkbox" />
+            <span>Color</span>
+          </label>
+          <div class="color-field">
+            <input id="field-color" type="color" value="#3b82f6" disabled />
+            <div class="swatch-row" id="field-color-swatches"></div>
+          </div>
+        </div>
+        <p id="form-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="cancel-btn" class="btn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="save-btn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Folder create/edit modal (from folder bar) -->
+  <div id="folder-modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="folder-modal-title">New Folder</h2>
+      <form id="folder-form">
+        <label>
+          Folder name
+          <input id="folder-name-input" type="text" placeholder="e.g. Work" required />
+        </label>
+        <div class="color-field-group">
+          <label class="checkbox-row">
+            <input id="folder-color-enabled" type="checkbox" />
+            <span>Color</span>
+          </label>
+          <div class="color-field">
+            <input id="folder-color-input" type="color" value="#3b82f6" disabled />
+            <div class="swatch-row" id="folder-color-swatches"></div>
+          </div>
+        </div>
+        <p id="folder-form-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="button" id="folder-cancel-btn" class="btn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="folder-save-btn">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
