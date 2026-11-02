@@ -1,6 +1,7 @@
 const BOOKMARKS_API = '/api/bookmarks';
 const FOLDERS_API = '/api/folders';
 const TAGS_API = '/api/tags';
+const PAGE_SIZE = 100;
 
 const folderBarEl = document.getElementById('folder-bar');
 const listEl = document.getElementById('bookmark-list');
@@ -52,13 +53,32 @@ let folders = [];
 let bookmarks = [];
 let editingId = null;
 let editingFolderId = null;
+let renderedFoldersSignature = '';
+let renderedFolderOptionsSignature = '';
+let renderedTagsSignature = '';
+let renderedListSignature = '';
+let lastLoadedQueryKey = null;
+let bookmarkRequestId = 0;
+const loadMoreBtn = document.createElement('button');
+loadMoreBtn.type = 'button';
+loadMoreBtn.className = 'btn';
+loadMoreBtn.textContent = 'Load more';
+loadMoreBtn.hidden = true;
 
 // view: { type: 'all' } | { type: 'favorites' } | { type: 'folder', id }
 let currentView = { type: 'all' };
 
+function getBookmarkQueryKey() {
+  return JSON.stringify([
+    currentView,
+    tagFilter.value.toLowerCase(),
+    searchInput.value.trim().toLowerCase(),
+  ]);
+}
+
 async function loadAll() {
   await Promise.all([fetchFolders(), fetchTags()]);
-  await fetchBookmarks();
+  await fetchBookmarks({ force: true });
 }
 
 async function fetchFolders() {
@@ -73,6 +93,9 @@ async function fetchTags() {
   const res = await fetch(TAGS_API);
   if (!res.ok) throw new Error('Failed to load tags');
   const tags = await res.json();
+  const signature = JSON.stringify(tags);
+  if (signature === renderedTagsSignature) return;
+
   const current = tagFilter.value;
   tagFilter.innerHTML = '<option value="">All tags</option>';
   for (const tag of tags) {
@@ -84,9 +107,15 @@ async function fetchTags() {
   if (tags.includes(current)) {
     tagFilter.value = current;
   }
+  renderedTagsSignature = signature;
 }
 
-async function fetchBookmarks() {
+async function fetchBookmarks({ append = false, force = false } = {}) {
+  const query = searchInput.value.trim();
+  const queryKey = getBookmarkQueryKey();
+  if (append && queryKey !== lastLoadedQueryKey) return;
+  if (!append && !force && queryKey === lastLoadedQueryKey) return;
+
   const params = new URLSearchParams();
 
   if (currentView.type === 'favorites') {
@@ -96,15 +125,40 @@ async function fetchBookmarks() {
   }
 
   if (tagFilter.value) params.set('tag', tagFilter.value);
-  if (searchInput.value.trim()) params.set('q', searchInput.value.trim());
+  if (query) params.set('q', query);
+  params.set('limit', String(PAGE_SIZE));
+  if (append && bookmarks.length > 0) {
+    const cursor = bookmarks[bookmarks.length - 1];
+    params.set('cursorCreatedAt', cursor.createdAt);
+    params.set('cursorId', String(cursor.id));
+  } else {
+    params.set('offset', '0');
+  }
 
-  const res = await fetch(`${BOOKMARKS_API}?${params.toString()}`);
-  if (!res.ok) throw new Error('Failed to load bookmarks');
-  bookmarks = await res.json();
-  renderList();
+  const requestId = ++bookmarkRequestId;
+  if (!append) loadMoreBtn.disabled = false;
+  else loadMoreBtn.disabled = true;
+
+  try {
+    const res = await fetch(`${BOOKMARKS_API}?${params.toString()}`);
+    if (!res.ok) throw new Error('Failed to load bookmarks');
+    const page = await res.json();
+    if (requestId !== bookmarkRequestId || queryKey !== getBookmarkQueryKey()) return;
+
+    const appendFrom = bookmarks.length;
+    bookmarks = append ? [...bookmarks, ...page] : page;
+    lastLoadedQueryKey = queryKey;
+    loadMoreBtn.hidden = res.headers.get('X-Has-More') !== 'true';
+    renderList({ append, appendFrom });
+  } finally {
+    if (requestId === bookmarkRequestId) loadMoreBtn.disabled = false;
+  }
 }
 
 function renderFolderBar() {
+  const signature = JSON.stringify([folders, currentView]);
+  if (signature === renderedFoldersSignature) return;
+
   folderBarEl.innerHTML = '';
 
   folderBarEl.appendChild(
@@ -143,6 +197,7 @@ function renderFolderBar() {
   addBtn.textContent = '+ Folder';
   addBtn.addEventListener('click', () => openFolderModal());
   folderBarEl.appendChild(addBtn);
+  renderedFoldersSignature = signature;
 }
 
 function buildPill({ label, count, color, active, onClick, onDelete, onColorClick }) {
@@ -191,6 +246,12 @@ function buildPill({ label, count, color, active, onClick, onDelete, onColorClic
 }
 
 function selectView(view) {
+  if (
+    currentView.type === view.type &&
+    (view.type !== 'folder' || currentView.id === view.id)
+  ) {
+    return;
+  }
   currentView = view;
   renderFolderBar();
   fetchBookmarks().catch((err) => console.error(err));
@@ -213,11 +274,18 @@ async function deleteFolder(folder) {
   }
 
   await fetchFolders();
-  await fetchBookmarks();
+  await fetchTags();
+  await fetchBookmarks({ force: true });
 }
 
 function renderFolderSelectOptions() {
   const current = fieldFolderSelect.value;
+  const signature = JSON.stringify([
+    folders.map(({ id, name }) => [id, name]),
+    current,
+  ]);
+  if (signature === renderedFolderOptionsSignature) return;
+
   fieldFolderSelect.innerHTML = '';
 
   const noneOpt = document.createElement('option');
@@ -240,23 +308,58 @@ function renderFolderSelectOptions() {
   if ([...fieldFolderSelect.options].some((o) => o.value === current)) {
     fieldFolderSelect.value = current;
   }
+  renderedFolderOptionsSignature = JSON.stringify([
+    folders.map(({ id, name }) => [id, name]),
+    fieldFolderSelect.value,
+  ]);
 }
 
-function renderList() {
-  listEl.innerHTML = '';
+function renderList({ append = false, appendFrom = 0 } = {}) {
+  const emptyMessage = bookmarks.length === 0
+    ? currentView.type === 'all' && !tagFilter.value && !searchInput.value.trim()
+      ? 'No bookmarks yet. Click "New Bookmark" to add one.'
+      : 'No bookmarks match this view.'
+    : '';
+  const signature = JSON.stringify({
+    bookmarks: bookmarks.map((bookmark) => [
+      bookmark.id,
+      bookmark.url,
+      bookmark.title,
+      bookmark.description,
+      bookmark.folderName,
+      bookmark.tags,
+      bookmark.isFavorite,
+      bookmark.color,
+    ]),
+    emptyMessage,
+    hasMore: !loadMoreBtn.hidden,
+  });
+  if (signature === renderedListSignature) return;
 
   if (bookmarks.length === 0) {
-    emptyStateEl.textContent =
-      currentView.type === 'all' && !tagFilter.value && !searchInput.value.trim()
-        ? 'No bookmarks yet. Click "New Bookmark" to add one.'
-        : 'No bookmarks match this view.';
+    listEl.replaceChildren();
+    emptyStateEl.textContent = emptyMessage;
     listEl.appendChild(emptyStateEl);
+    loadMoreBtn.remove();
+    renderedListSignature = signature;
     return;
   }
 
-  for (const bookmark of bookmarks) {
-    listEl.appendChild(renderCard(bookmark));
+  if (append) {
+    const newBookmarks = bookmarks.slice(appendFrom);
+    for (const bookmark of newBookmarks) {
+      listEl.appendChild(renderCard(bookmark));
+    }
+  } else {
+    listEl.replaceChildren(...bookmarks.map(renderCard));
   }
+
+  if (!loadMoreBtn.hidden) {
+    listEl.appendChild(loadMoreBtn);
+  } else {
+    loadMoreBtn.remove();
+  }
+  renderedListSignature = signature;
 }
 
 function renderCard(bookmark) {
@@ -357,7 +460,7 @@ async function toggleFavorite(bookmark) {
     return;
   }
   await fetchFolders();
-  await fetchBookmarks();
+  await fetchBookmarks({ force: true });
 }
 
 function openModal(bookmark) {
@@ -389,12 +492,14 @@ function closeModal() {
 async function deleteBookmark(id) {
   if (!confirm('Delete this bookmark?')) return;
   const res = await fetch(`${BOOKMARKS_API}/${id}`, { method: 'DELETE' });
-  if (!res.ok && res.status !== 404) {
+  if (res.status === 404) return;
+  if (!res.ok) {
     alert('Failed to delete bookmark');
     return;
   }
   await fetchFolders();
-  await fetchBookmarks();
+  await fetchTags();
+  await fetchBookmarks({ force: true });
 }
 
 function buildSwatches(container, colorInput, enabledCheckbox) {
@@ -530,7 +635,7 @@ form.addEventListener('submit', async (e) => {
     closeModal();
     await fetchFolders();
     await fetchTags();
-    await fetchBookmarks();
+    await fetchBookmarks({ force: true });
   } catch (err) {
     formError.textContent = err.message;
     formError.classList.remove('hidden');
@@ -547,10 +652,17 @@ modalOverlay.addEventListener('click', (e) => {
 
 let searchDebounce;
 searchInput.addEventListener('input', () => {
+  bookmarkRequestId += 1;
   clearTimeout(searchDebounce);
   searchDebounce = setTimeout(() => fetchBookmarks().catch((err) => console.error(err)), 200);
 });
-tagFilter.addEventListener('change', () => fetchBookmarks().catch((err) => console.error(err)));
+tagFilter.addEventListener('change', () => {
+  bookmarkRequestId += 1;
+  fetchBookmarks().catch((err) => console.error(err));
+});
+loadMoreBtn.addEventListener('click', () => {
+  fetchBookmarks({ append: true }).catch((err) => console.error(err));
+});
 
 function openFolderModal(folder) {
   editingFolderId = folder ? folder.id : null;
@@ -601,8 +713,10 @@ folderForm.addEventListener('submit', async (e) => {
     return;
   }
 
+  const wasEditing = editingFolderId !== null;
   closeFolderModal();
   await fetchFolders();
+  if (wasEditing) await fetchBookmarks({ force: true });
 });
 
 folderCancelBtn.addEventListener('click', closeFolderModal);

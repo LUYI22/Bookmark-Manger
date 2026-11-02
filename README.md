@@ -20,6 +20,8 @@ the frontend and backend. Open <http://127.0.0.1:8080> in your browser. Press
 Ctrl+C in the terminal to stop both services.
 
 Bookmarks are stored in `project/backend/data/bookmarks.db`.
+Search, folder, favorite, and tag filters run in SQLite. Results load 100 at a
+time using cursor-based pagination, and bookmark tags are indexed for filtering.
 
 ## AI assistance disclosure
 

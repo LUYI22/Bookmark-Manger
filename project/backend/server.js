@@ -2,8 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const db = require('./db');
 
-const PORT = 3001;
+const PORT = Number(process.env.PORT) || 3001;
 const app = express();
+const DEFAULT_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 200;
 
 app.use(cors());
 app.use(express.json());
@@ -101,6 +103,32 @@ const BOOKMARK_SELECT = `
   LEFT JOIN folders f ON f.id = b.folder_id
 `;
 
+function replaceBookmarkTags(bookmarkId, tags) {
+  db.prepare('DELETE FROM bookmark_tags WHERE bookmark_id = ?').run(bookmarkId);
+  const insertTag = db.prepare(
+    'INSERT INTO bookmark_tags (bookmark_id, tag) VALUES (?, ?)'
+  );
+  for (const tag of tags) {
+    insertTag.run(bookmarkId, tag);
+  }
+}
+
+function withTransaction(work) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = work();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function escapeLike(value) {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
 // ---------- Folders ----------
 
 app.get('/api/folders', (req, res) => {
@@ -189,15 +217,10 @@ app.delete('/api/folders/:id', (req, res) => {
 // ---------- Tags ----------
 
 app.get('/api/tags', (req, res) => {
-  const rows = db.prepare('SELECT tags FROM bookmarks').all();
-  const tagSet = new Map();
-  for (const row of rows) {
-    for (const tag of JSON.parse(row.tags || '[]')) {
-      const key = tag.toLowerCase();
-      if (!tagSet.has(key)) tagSet.set(key, tag);
-    }
-  }
-  const tags = Array.from(tagSet.values()).sort((a, b) => a.localeCompare(b));
+  const tags = db
+    .prepare('SELECT DISTINCT tag FROM bookmark_tags ORDER BY tag COLLATE NOCASE')
+    .all()
+    .map((row) => row.tag);
   res.json(tags);
 });
 
@@ -205,41 +228,82 @@ app.get('/api/tags', (req, res) => {
 
 app.get('/api/bookmarks', (req, res) => {
   const { folderId, favorite, tag, q } = req.query;
-
-  let rows = db.prepare(`${BOOKMARK_SELECT} ORDER BY b.created_at DESC`).all();
-
-  let bookmarks = rows.map(serializeBookmark);
+  const conditions = [];
+  const values = [];
 
   if (favorite === 'true') {
-    bookmarks = bookmarks.filter((b) => b.isFavorite);
+    conditions.push('b.is_favorite = 1');
   } else if (folderId !== undefined && folderId !== '' && folderId !== 'all') {
     if (folderId === 'none') {
-      bookmarks = bookmarks.filter((b) => b.folderId === null);
+      conditions.push('b.folder_id IS NULL');
     } else {
-      const fid = Number(folderId);
-      bookmarks = bookmarks.filter((b) => b.folderId === fid);
+      const folderNumber = Number(folderId);
+      if (!Number.isInteger(folderNumber) || folderNumber < 1) {
+        return res.status(400).json({ error: 'folderId must be a positive integer' });
+      }
+      conditions.push('b.folder_id = ?');
+      values.push(folderNumber);
     }
   }
 
   if (tag) {
-    const tagLower = String(tag).toLowerCase();
-    bookmarks = bookmarks.filter((b) =>
-      b.tags.some((t) => t.toLowerCase() === tagLower)
-    );
+    conditions.push(`
+      EXISTS (
+        SELECT 1 FROM bookmark_tags bt
+        WHERE bt.bookmark_id = b.id AND bt.tag = ? COLLATE NOCASE
+      )
+    `);
+    values.push(String(tag));
   }
 
   if (q) {
-    const query = String(q).toLowerCase();
-    bookmarks = bookmarks.filter((b) => {
-      const haystack = [b.title, b.url, b.description, ...b.tags]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(query);
-    });
+    const search = `%${escapeLike(String(q).trim().toLowerCase())}%`;
+    conditions.push(`(
+      lower(coalesce(b.title, '')) LIKE ? ESCAPE '\\'
+      OR lower(b.url) LIKE ? ESCAPE '\\'
+      OR lower(coalesce(b.description, '')) LIKE ? ESCAPE '\\'
+      OR EXISTS (
+        SELECT 1 FROM bookmark_tags bt
+        WHERE bt.bookmark_id = b.id AND lower(bt.tag) LIKE ? ESCAPE '\\'
+      )
+    )`);
+    values.push(search, search, search, search);
   }
 
-  res.json(bookmarks);
+  const cursorCreatedAt = req.query.cursorCreatedAt;
+  const cursorId = Number(req.query.cursorId);
+  if ((cursorCreatedAt === undefined) !== (req.query.cursorId === undefined)) {
+    return res.status(400).json({ error: 'cursorCreatedAt and cursorId must be provided together' });
+  }
+  if (cursorCreatedAt !== undefined) {
+    if (typeof cursorCreatedAt !== 'string' || !Number.isInteger(cursorId) || cursorId < 1) {
+      return res.status(400).json({ error: 'invalid bookmark cursor' });
+    }
+    conditions.push('(b.created_at < ? OR (b.created_at = ? AND b.id < ?))');
+    values.push(cursorCreatedAt, cursorCreatedAt, cursorId);
+  }
+
+  const requestedLimit = Number(req.query.limit);
+  const limit = Number.isInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, MAX_PAGE_SIZE)
+    : DEFAULT_PAGE_SIZE;
+  const requestedOffset = Number(req.query.offset);
+  const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0
+    ? requestedOffset
+    : 0;
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const rows = db
+    .prepare(
+      `${BOOKMARK_SELECT}
+       ${where}
+       ORDER BY b.created_at DESC, b.id DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...values, limit + 1, cursorCreatedAt === undefined ? offset : 0);
+
+  const hasMore = rows.length > limit;
+  res.set('X-Has-More', String(hasMore));
+  res.json(rows.slice(0, limit).map(serializeBookmark));
 });
 
 app.post('/api/bookmarks', (req, res) => {
@@ -266,20 +330,24 @@ app.post('/api/bookmarks', (req, res) => {
 
   const sanitizedTags = sanitizeTags(tags);
 
-  const result = db
-    .prepare(
-      `INSERT INTO bookmarks (url, title, description, folder_id, tags, is_favorite, color)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      normalizedUrl,
-      title ? String(title).trim() : null,
-      description ? String(description).trim() : null,
-      resolvedFolderId,
-      JSON.stringify(sanitizedTags),
-      isFavorite ? 1 : 0,
-      colorResult.value
-    );
+  const result = withTransaction(() => {
+    const inserted = db
+      .prepare(
+        `INSERT INTO bookmarks (url, title, description, folder_id, tags, is_favorite, color)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        normalizedUrl,
+        title ? String(title).trim() : null,
+        description ? String(description).trim() : null,
+        resolvedFolderId,
+        JSON.stringify(sanitizedTags),
+        isFavorite ? 1 : 0,
+        colorResult.value
+      );
+    replaceBookmarkTags(inserted.lastInsertRowid, sanitizedTags);
+    return inserted;
+  });
 
   const row = db
     .prepare(`${BOOKMARK_SELECT} WHERE b.id = ?`)
@@ -348,21 +416,24 @@ app.put('/api/bookmarks/:id', (req, res) => {
     newColor = colorResult.value;
   }
 
-  db.prepare(
-    `UPDATE bookmarks
-     SET url = ?, title = ?, description = ?, folder_id = ?, tags = ?, is_favorite = ?, color = ?,
-         updated_at = datetime('now')
-     WHERE id = ?`
-  ).run(
-    normalizedUrl,
-    newTitle,
-    newDescription,
-    newFolderId,
-    JSON.stringify(newTags),
-    newIsFavorite,
-    newColor,
-    id
-  );
+  withTransaction(() => {
+    db.prepare(
+      `UPDATE bookmarks
+       SET url = ?, title = ?, description = ?, folder_id = ?, tags = ?, is_favorite = ?, color = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(
+      normalizedUrl,
+      newTitle,
+      newDescription,
+      newFolderId,
+      JSON.stringify(newTags),
+      newIsFavorite,
+      newColor,
+      id
+    );
+    replaceBookmarkTags(id, newTags);
+  });
 
   const updated = db.prepare(`${BOOKMARK_SELECT} WHERE b.id = ?`).get(id);
 
