@@ -111,4 +111,4 @@ favorites. Pagination accepts `limit` and `offset`, or `limit` and both
 
 ## AI assistance disclosure
 
-I used Claude to help me create this app within approximately 45 minutes.
+I used Claude to help me create this app under 45 minutes.
